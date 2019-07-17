@@ -1,0 +1,359 @@
+#!/usr/bin/env python3
+
+import argparse
+from configparser import ConfigParser
+from contextlib import contextmanager
+from datetime import datetime
+import logging
+import os
+import os.path
+import shlex
+import subprocess
+import shutil
+import sys
+import time
+
+
+SCRIPT_NAMES = ("presnapshot", "postsnapshot", "preperform", "postperform")
+LOCK_NAME = "lock"
+
+MKDIR = "mkdir"
+ZFS = "zfs"
+RCLONE = "rclone"
+
+
+class ZfsBackup(object):
+  @classmethod
+  def main(cls):
+    o = cls()
+
+    parser = argparse.ArgumentParser(description="Backup ZFS")
+    parser.add_argument(
+      "-c", "--confdir",
+      default=os.environ.get("ZFS_BACKUP_CONFDIR", None),
+      help="the config dir (could also be specified via the ZFS_BACKUP_CONFDIR environment variable)"
+    )
+
+    subparsers = parser.add_subparsers()
+
+    lock_parser = subparsers.add_parser("lock", help="create a lock file")
+    lock_parser.set_defaults(f=o.lock)
+
+    unlock_parser = subparsers.add_parser("unlock", help="delete the lock file")
+    unlock_parser.set_defaults(f=o.unlock)
+
+    snapshot_parser = subparsers.add_parser("snapshot", help="take a ZFS snapshot")
+    snapshot_parser.set_defaults(f=o.snapshot)
+
+    export_intermediate_parser = subparsers.add_parser("export-intermediate", help="exports the ZFS snapshot to an intermediate directory as files")
+    export_intermediate_parser.add_argument("-f", "--full", action="store_true", default=False, help="a full backup instead of a differential backup will be generated")
+    export_intermediate_parser.set_defaults(f=o.export_intermediate)
+
+    prune_intermediate_parser = subparsers.add_parser("prune-intermediate", help="prune the intermediate directories")
+    prune_intermediate_parser.set_defaults(f=o.prune_intermediate)
+
+    prune_snapshots_parser = subparsers.add_parser("prune-snapshots", help="prune zfs snapshots")
+    prune_snapshots_parser.set_defaults(f=o.prune_snapshots)
+
+    rclone_parser = subparsers.add_parser("rclone", help="upload the intermediate snapshots rclone")
+    rclone_parser.set_defaults(f=o.rclone)
+
+    perform_parser = subparsers.add_parser("perform", help="perform the whole backup process")
+    perform_parser.set_defaults(f=o.perform)
+
+    perform_parser = subparsers.add_parser("info", help="Print the configuration and what not")
+    perform_parser.set_defaults(f=o.info)
+
+    args = parser.parse_args()
+    if args.confdir is None:
+      print("error: must specify --confdir or ZFS_BACKUP_CONFDIR", file=sys.stderr)
+      sys.exit(1)
+
+    if not os.path.isdir(args.confdir):
+      print("error: {} is not a valid directory".format(args.confdir), file=sys.stderr)
+      sys.exit(1)
+
+    args = vars(args)
+
+    if "f" not in args:
+      print("error: missing action", file=sys.stderr)
+      parser.print_usage(file=sys.stderr)
+      sys.exit(1)
+
+    level = logging.DEBUG if os.environ.get("ZFS_BACKUP_DEBUG", False) else logging.INFO
+    logging.basicConfig(format="[%(levelname).1s] %(message)s", datefmt="%Y-%m-%d %H:%M:%S", level=level)
+
+    logging.info("starting run of zfs-backup")
+
+    try:
+      o._parse_config(args.pop("confdir"))
+    except (FileNotFoundError, KeyError) as e:
+      print("error: {}".format(e.args[0]), file=sys.stderr)
+      sys.exit(1)
+
+    f = args.pop("f")
+    f(**args)
+
+  def __init__(self):
+    pass
+
+  def _parse_config(self, confdir):
+    self.c = ConfigParser()
+    conffile = os.path.join(confdir, "config.ini")
+
+    if not os.path.isfile(conffile):
+      raise FileNotFoundError("{} is not a valid file".format(conffile))
+
+    self.c["DEFAULT"] = {
+      "split_size": "1G",
+      "oldest_snapshot_days": 120,
+      "rclone_conf": os.environ.get("RCLONE_CONFIG", os.path.join(os.path.expanduser("~"), ".rclone.conf")),
+      "rclone_bwlimit": "",
+    }
+
+    self.c.read(conffile)
+    if "main" not in self.c:
+      raise KeyError("[main] must be specified")
+
+    d = self.c["main"]
+    for k in ["key", "zfs_fs", "intermediate_basedir", "upload_to"]:
+      if k not in d:
+        raise KeyError("'{}' must be specified".format(k))
+
+    for k in self.c["main"]:
+      setattr(self, k, self.c["main"][k])
+
+    try:
+      self.oldest_snapshot_days = int(self.oldest_snapshot_days)
+    except ValueError:
+      raise KeyError("'oldest_snapshot_days' must be an integer")
+
+    if not self.intermediate_basedir.startswith("/"):
+      raise KeyError("intermediate_basedir must be an absolute path")
+
+    if not os.path.isdir(self.intermediate_basedir):
+      raise FileNotFoundError("{} is not a directory".format(self.intermediate_basedir))
+
+    logging.info("Parameters")
+    logging.info("==========")
+    for k in self.c["main"]:
+      logging.info("{:<20} = {}".format(k, self.c["main"][k]))
+
+    for k in SCRIPT_NAMES:
+      p = os.path.join(confdir, k)
+      if not os.path.isfile(p):
+        p = None
+
+      setattr(self, k, p)
+
+    logging.info("")
+    logging.info("Custom Scripts")
+    logging.info("==============")
+    for k in SCRIPT_NAMES:
+      logging.info("{:<20} = {}".format(k, getattr(self, k)))
+
+    self.snapshots = self._current_snapshots()
+
+    logging.info("")
+    logging.info("Current Snapshots")
+    logging.info("=================")
+    if len(self.snapshots) > 0:
+      for name, creation in self.snapshots:
+        logging.info("{:<20} @ {}".format(name, creation))
+    else:
+      logging.info("No snapshots found.")
+
+    logging.info("")
+
+  def lock(self):
+    logging.info("creating lock file")
+    with open(self._lock_path, "w"):
+      pass
+
+  def unlock(self):
+    logging.info("removing lock file")
+    if os.path.exists(self._lock_path):
+      os.remove(self._lock_path)
+
+  def snapshot(self):
+    snapshot_id = datetime.now().strftime("%Y%m%d%H%M%S")
+    zfs_name = "{}@{}".format(self.zfs_fs, snapshot_id)
+
+    if self.presnapshot:
+      self._execute(self.presnapshot)
+
+    self._execute("{} snapshot {}".format(ZFS, zfs_name))
+
+    if self.postsnapshot:
+      self._execute(self.postsnapshot)
+
+    # Have to update the list of current snapshots so following actions like
+    # export_intermediate operates on the correct snapshot
+    self.snapshots = self._current_snapshots()
+
+  def export_intermediate(self, full=False):
+    if len(self.snapshots) == 0:
+      raise Exception("cannot export_intermediate when there are no snapshots")
+
+    current_zfs_name = self.snapshots[0][0]
+    backup_folder_name, backup_filename = self._backup_folder_file_name(current_zfs_name)
+
+    os.umask(0o77)
+    if not full and len(self.snapshots) > 1:
+      previous_zfs_name = self.snapshots[1][0]
+      opts = "-i {}".format(previous_zfs_name)
+    else:
+      opts = ""
+      backup_folder_name = backup_folder_name + "-full"
+
+    current_intermediate_basedir = os.path.join(self.intermediate_basedir, backup_folder_name)
+    self._execute("{} -p {}".format(MKDIR, current_intermediate_basedir))
+    with chdir(current_intermediate_basedir):
+      command = "{ZFS} send {opts} {current_zfs_name} | gpg1 -c --cipher-algo AES256 --batch --passphrase {key} | split - --bytes {split_size} --suffix-length=4 --numeric-suffixes {fileprefix}".format(
+        ZFS=ZFS,
+        opts=opts,
+        current_zfs_name=current_zfs_name,
+        key=self.key,
+        split_size=self.split_size,
+        fileprefix=backup_filename
+      )
+      self._execute(command)
+
+  def prune_intermediate(self):
+    if len(self.snapshots) <= 1:
+      return
+
+    previous_backup_folder_name, _ = self._backup_folder_file_name(self.snapshots[1][0])
+    previous_intermediate_basedir = os.path.join(self.intermediate_basedir, previous_backup_folder_name)
+    if os.path.exists(previous_intermediate_basedir):
+      logging.info("removing {}".format(previous_intermediate_basedir))
+      shutil.rmtree(previous_intermediate_basedir)
+
+  def prune_snapshots(self):
+    now = datetime.now()
+    rebuild = False
+    for snapshot, creation_time in self.snapshots:
+      delta = now - creation_time
+      if delta.total_seconds() > self.oldest_snapshot_days * 86400:
+        rebuild = True
+        logging.info("expiring {} as it is {:.2f} days old".format(snapshot, delta.total_seconds() / 86400))
+        command = "zfs destroy {}".format(snapshot).strip()
+
+        # Extra caution...
+        if command == "zfs destroy {}".format(self.zfs_fs):
+          raise RuntimeError("Whoa what")
+
+        self._execute(command)
+
+    if rebuild:
+      self.snapshots = self._current_snapshots()
+    else:
+      logging.info("no snapshots deleted")
+
+  def rclone(self):
+    backup_folder_name, _ = self._backup_folder_file_name(self.snapshots[0][0])
+    current_intermediate_basedir = os.path.join(self.intermediate_basedir, backup_folder_name)
+
+    logging.info("uploading {} to {}".format(current_intermediate_basedir, self.upload_to))
+
+    os.environ["RCLONE_CONFIG"] = self.rclone_conf
+    command = [
+      "{RCLONE} sync -v --stats=20s".format(RCLONE=RCLONE),
+    ]
+
+    if self.rclone_bwlimit:
+      command.append("--bwlimit {}".format(shlex.quote(self.rclone_bwlimit)))
+
+    command.append(current_intermediate_basedir)
+    command.append("{upload_to}/{current_intermediate_basedir}".format(upload_to=self.upload_to, current_intermediate_basedir=current_intermediate_basedir))
+    command = " ".join(command)
+    self._execute(command)
+
+  def perform(self):
+    if self._is_locked:
+      message = "attempted to backup '{}' while locked since {}".format(self.zfs_fs, time.ctime(os.path.getctime(self._lock_path)))
+      logging.error(message)
+      logging.error("quitting....")
+      self._report_error(message)
+
+    if self.preperform:
+      self._execute(self.preperform)
+
+    self.lock()
+    self.snapshot()
+    self.export_intermediate()
+    self.prune_intermediate()
+    self.prune_snapshots()
+    self.rclone()
+
+    if self.postperform:
+      self._execute(self.postperform)
+
+    self.unlock()
+
+  def info(self):
+    logging.info("Other Information")
+    logging.info("=================")
+
+    logging.info("{:<20} = {}".format("locked", self._is_locked))
+
+  def _backup_folder_file_name(self, snapshot_name):
+    return snapshot_name.split("@")[1], snapshot_name.replace("@", "-") + ".zfs.gpg."
+
+  @property
+  def _is_locked(self):
+    return os.path.exists(self._lock_path)
+
+  @property
+  def _lock_path(self):
+    return os.path.join(self.intermediate_basedir, LOCK_NAME)
+
+  def _report_error(self, message):
+    pass
+
+  def _current_snapshots(self):
+    snapshots = []
+    data = self._execute("zfs list -H -t snapshot -o name,creation -S creation -d1 {}".format(self.zfs_fs), capture=True, log=False).stdout.strip()
+    if len(data) == 0:  # No snapshots
+      return []
+
+    data = data.split("\n")
+
+    for line in data:
+      line = line.split("\t")
+      if len(line) != 2:
+        raise RuntimeError("zfs command should have returned two columns?")
+
+      name = line[0]
+      creation = line[1]
+
+      creation = datetime.strptime(creation, "%a %b %d %H:%M %Y")
+      snapshots.append((name, creation))
+
+    return snapshots
+
+  def _execute(self, cmd, capture=False, raises=True, encoding="utf-8", log=True):
+    if log:
+      logging.info("+ {}".format(cmd))
+
+    stdout = subprocess.PIPE if capture else None
+    status = subprocess.run(cmd, stdout=stdout, check=raises, shell=True)
+
+    if capture:
+      status.stdout = status.stdout.decode(encoding)
+
+    return status
+
+
+@contextmanager
+def chdir(path):
+  old_cwd = os.getcwd()
+  try:
+    os.chdir(path)
+    yield
+  finally:
+    os.chdir(old_cwd)
+
+
+if __name__ == "__main__":
+  ZfsBackup.main()
