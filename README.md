@@ -49,9 +49,14 @@ config_dir/
     postsnapshot # optional, chmod +x
     preperform   # optional, chmod +x
     postperform  # optional, chmod +x
+    reporterror  # optional, chmod +x
 ```
 
-The `presnapshot`, `postsnapshot`, `preperform`, and `postperform` scripts are optional. If they do not exist, they will not run. `config.ini` is specified as follows:
+The `presnapshot`, `postsnapshot`, `preperform`, `postperform`, `reporterror`
+scripts are optional. If they do not exist, they will not run. `reporterror` is
+given a single argument, which is the error message.
+
+`config.ini` is specified as follows:
 
 ```
 [main]

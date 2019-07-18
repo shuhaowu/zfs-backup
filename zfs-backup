@@ -14,7 +14,7 @@ import sys
 import time
 
 
-SCRIPT_NAMES = ("presnapshot", "postsnapshot", "preperform", "postperform")
+SCRIPT_NAMES = ("presnapshot", "postsnapshot", "preperform", "postperform", "reporterror")
 LOCK_NAME = "lock"
 
 MKDIR = "mkdir"
@@ -279,6 +279,7 @@ class ZfsBackup(object):
       logging.error(message)
       logging.error("quitting....")
       self._report_error(message)
+      return
 
     if self.preperform:
       self._execute(self.preperform)
@@ -313,7 +314,11 @@ class ZfsBackup(object):
     return os.path.join(self.intermediate_basedir, LOCK_NAME)
 
   def _report_error(self, message):
-    pass
+    if self.reporterror is None:
+      logging.warn("cannot report error as reporterror script is not defined")
+      return
+
+    subprocess.run([self.reporterror, message], stdout=None, check=True)
 
   def _current_snapshots(self):
     snapshots = []
