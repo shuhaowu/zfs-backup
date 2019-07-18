@@ -56,6 +56,7 @@ class ZfsBackup(object):
     prune_snapshots_parser.set_defaults(f=o.prune_snapshots)
 
     rclone_parser = subparsers.add_parser("rclone", help="upload the intermediate snapshots rclone")
+    rclone_parser.add_argument("-f", "--full", action="store_true", default=False, help="must be specified if the backup generated is a full abckup")
     rclone_parser.set_defaults(f=o.rclone)
 
     perform_parser = subparsers.add_parser("perform", help="perform the whole backup process")
@@ -205,9 +206,11 @@ class ZfsBackup(object):
     if not full and len(self.snapshots) > 1:
       previous_zfs_name = self.snapshots[1][0]
       opts = "-i {}".format(previous_zfs_name)
+      full = False
     else:
       opts = ""
       backup_folder_name = backup_folder_name + "-full"
+      full = True
 
     current_intermediate_basedir = os.path.join(self.intermediate_basedir, backup_folder_name)
     backup_filename = os.path.join(current_intermediate_basedir, backup_filename)
@@ -223,6 +226,8 @@ class ZfsBackup(object):
       )
       logging.info("exeucting main zfs send command (command masked due to key)")
       self._execute(command, log=False)
+
+    return full
 
   def prune_intermediate(self):
     if len(self.snapshots) <= 1:
@@ -255,8 +260,11 @@ class ZfsBackup(object):
     else:
       logging.info("no snapshots deleted")
 
-  def rclone(self):
+  def rclone(self, full=False):
     backup_folder_name, _ = self._backup_folder_file_name(self.snapshots[0][0])
+    if full:
+      backup_folder_name = backup_folder_name + "-full"
+
     current_intermediate_basedir = os.path.join(self.intermediate_basedir, backup_folder_name)
 
     logging.info("uploading {} to {}".format(current_intermediate_basedir, self.upload_to))
@@ -287,10 +295,10 @@ class ZfsBackup(object):
 
     self.lock()
     self.snapshot()
-    self.export_intermediate()
+    full = self.export_intermediate()
     self.prune_intermediate()
     self.prune_snapshots()
-    self.rclone()
+    self.rclone(full=full)
 
     if self.postperform:
       self._execute(self.postperform)
