@@ -137,7 +137,10 @@ class ZfsBackup(object):
     logging.info("Parameters")
     logging.info("==========")
     for k in self.c["main"]:
-      logging.info("{:<20} = {}".format(k, self.c["main"][k]))
+      v = self.c["main"][k]
+      if k == "key":
+        v = "<redacted>"
+      logging.info("{:<20} = {}".format(k, v))
 
     for k in SCRIPT_NAMES:
       p = os.path.join(confdir, k)
