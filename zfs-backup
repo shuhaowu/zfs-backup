@@ -210,6 +210,7 @@ class ZfsBackup(object):
       backup_folder_name = backup_folder_name + "-full"
 
     current_intermediate_basedir = os.path.join(self.intermediate_basedir, backup_folder_name)
+    backup_filename = os.path.join(current_intermediate_basedir, backup_filename)
     self._execute("{} -p {}".format(MKDIR, current_intermediate_basedir))
     with chdir(current_intermediate_basedir):
       command = "{ZFS} send {opts} {current_zfs_name} | gpg1 -c --cipher-algo AES256 --batch --passphrase {key} | split - --bytes {split_size} --suffix-length=4 --numeric-suffixes {fileprefix}".format(
@@ -220,7 +221,7 @@ class ZfsBackup(object):
         split_size=self.split_size,
         fileprefix=backup_filename
       )
-      self._execute(command)
+      self._execute(command, log=False)
 
   def prune_intermediate(self):
     if len(self.snapshots) <= 1:
