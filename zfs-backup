@@ -221,6 +221,7 @@ class ZfsBackup(object):
         split_size=self.split_size,
         fileprefix=backup_filename
       )
+      logging.info("exeucting main zfs send command (command masked due to key)")
       self._execute(command, log=False)
 
   def prune_intermediate(self):
@@ -269,7 +270,7 @@ class ZfsBackup(object):
       command.append("--bwlimit {}".format(shlex.quote(self.rclone_bwlimit)))
 
     command.append(current_intermediate_basedir)
-    command.append("{upload_to}/{current_intermediate_basedir}".format(upload_to=self.upload_to, current_intermediate_basedir=current_intermediate_basedir))
+    command.append("{upload_to}/{backup_folder_name}".format(upload_to=self.upload_to, backup_folder_name=backup_folder_name))
     command = " ".join(command)
     self._execute(command)
 
@@ -303,7 +304,7 @@ class ZfsBackup(object):
     logging.info("{:<20} = {}".format("locked", self._is_locked))
 
   def _backup_folder_file_name(self, snapshot_name):
-    return snapshot_name.split("@")[1], snapshot_name.replace("@", "-") + ".zfs.gpg."
+    return snapshot_name.split("@")[1], snapshot_name.replace("/", "-") + ".zfs.gpg."
 
   @property
   def _is_locked(self):
