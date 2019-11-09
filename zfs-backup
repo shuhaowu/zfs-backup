@@ -16,6 +16,7 @@ import time
 
 SCRIPT_NAMES = ("presnapshot", "postsnapshot", "preperform", "postperform", "reporterror")
 LOCK_NAME = "lock"
+LAST_SUCCESSFUL_NAME = "last_success"
 
 MKDIR = "mkdir"
 ZFS = "zfs"
@@ -135,6 +136,8 @@ class ZfsBackup(object):
     if not os.path.isdir(self.intermediate_basedir):
       raise FileNotFoundError("{} is not a directory".format(self.intermediate_basedir))
 
+
+
     logging.info("Parameters")
     logging.info("==========")
     for k in self.c["main"]:
@@ -194,6 +197,7 @@ class ZfsBackup(object):
     # Have to update the list of current snapshots so following actions like
     # export_intermediate operates on the correct snapshot
     self.snapshots = self._current_snapshots()
+    return zfs_name
 
   def export_intermediate(self, full=False):
     if len(self.snapshots) == 0:
@@ -282,10 +286,21 @@ class ZfsBackup(object):
     command = " ".join(command)
     self._execute(command)
 
+  def _record_last_successful_backup(self, name):
+    path = self._last_successful_backup_file
+    with open(path, "w") as f:
+      f.write(name)
+
   def perform(self):
     if self._is_locked:
+      last_successful_backup = self._last_successful_backup
+
       message = "attempted to backup '{}' while locked since {}".format(self.zfs_fs, time.ctime(os.path.getctime(self._lock_path)))
       logging.error(message)
+      if last_successful_backup is not None:
+        logging.error("the last successful backup is '{}', everything after should be deleted from local/remote storage to maintain consistency".format(last_successful_backup))
+      else:
+        logging.error("no last successful backup detected, delete all snapshots and try again...")
       logging.error("quitting....")
       self._report_error(message)
       return
@@ -294,7 +309,7 @@ class ZfsBackup(object):
       self._execute(self.preperform)
 
     self.lock()
-    self.snapshot()
+    zfs_name = self.snapshot()
     full = self.export_intermediate()
     self.prune_intermediate()
     self.prune_snapshots()
@@ -303,6 +318,7 @@ class ZfsBackup(object):
     if self.postperform:
       self._execute(self.postperform)
 
+    self._record_last_successful_backup(zfs_name)
     self.unlock()
 
   def info(self):
@@ -321,6 +337,19 @@ class ZfsBackup(object):
   @property
   def _lock_path(self):
     return os.path.join(self.intermediate_basedir, LOCK_NAME)
+
+  @property
+  def _last_successful_backup(self):
+    path = self._last_successful_backup_file
+    if not os.path.isfile(path):
+      return None
+
+    with open(path) as f:
+      return f.read().strip()
+
+  @property
+  def _last_successful_backup_file(self):
+    return os.path.join(self.intermediate_basedir, LAST_SUCCESSFUL_NAME)
 
   def _report_error(self, message):
     if self.reporterror is None:
