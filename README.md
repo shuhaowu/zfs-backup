@@ -14,6 +14,7 @@ Commands
 --------
 
 - `zfs-backup perform`
+- `zfs-backup show-context`
 - `zfs-backup lock`
 - `zfs-backup unlock`
 - `zfs-backup snapshot`
@@ -36,6 +37,10 @@ Descriptions
 
 Performs a full backup sequence as specified by the config file. See [Config
 File](#config-file) and [Backup Sequence](#backup-sequence) for details.
+
+**`zfs-backup show-context`**
+
+Shows the context as seen by zfs-backup, with all options interpolated merged.
 
 **`zfs-backup lock`**
 
@@ -117,6 +122,7 @@ rclone_bwlimit        = ...
 rclone_args           = ...
 oldest_snapshot_days  = 120
 on_failure            = /opt/bin/on-backup-failure
+remote_prune_disabled = yes
 
 [backup-sequence]
 step01 = lock
@@ -133,16 +139,16 @@ step09 = verify-checksums
 # This will result in the last full backup and only the most recent backup
 # stored in the intermediate basedir, along with the full backup with age 
 # closest to the age of 1 week, 6 months, and 1 year.
-keep-last-chain               = 0
-keep-last-full-only           = 1
-keep-last-incremental-only    = 1
-keep-full-with-age-closest-to = 1w,6m,1y
+keep_last_chain               = 0
+keep_last_full_only           = 1
+keep_last_incremental_only    = 1
+keep_full_with_age_closest_to = 1w,6m,1y
 
 [lifecycle-remote]
 # This will result in the last full chain (full + all subsequent incremental
 # until the most recent one) and 2 more full backups before that being kept.
-keep-last-chains    = 1
-keep-last-full-only = 3
+keep_last_chain     = 1
+keep_last_full_only = 3
 ```
 
 ### Main configurations
